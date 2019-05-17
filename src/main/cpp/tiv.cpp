@@ -4,11 +4,20 @@
 #include <map>
 #include <string>
 #include <vector>
-#include <sys/ioctl.h>
-#include <experimental/filesystem>
 
 #define cimg_display 0
 #include "CImg.h"
+
+#ifndef _WIN32
+	#include <sys/ioctl.h>
+	#include <experimental/filesystem>
+#else
+	// CImg redefines min/max macros, and this confuses VS, breaking std::min/max
+	#undef min
+	#undef max
+	#include <windows.h>
+	#include <filesystem> // assuming VS 2017+
+#endif
 
 //using namespace std;
 
@@ -346,25 +355,61 @@ void emit_color(int flags, int r, int g, int b) {
 
 
 void emitCodepoint(int codepoint) {
-  if (codepoint < 128) {
-    std::cout << (char) codepoint;
-  } else if (codepoint < 0x7ff) {
-    std::cout << (char) (0xc0 | (codepoint >> 6));
-    std::cout << (char) (0x80 | (codepoint & 0x3f));
-  } else if (codepoint < 0xffff) {
-    std::cout << (char) (0xe0 | (codepoint >> 12));
-    std::cout << (char) (0x80 | ((codepoint >> 6) & 0x3f));
-    std::cout << (char) (0x80 | (codepoint & 0x3f));
-  } else if (codepoint < 0x10ffff) {
-    std::cout << (char) (0xf0 | (codepoint >> 18));
-    std::cout << (char) (0x80 | ((codepoint >> 12) & 0x3f));
-    std::cout << (char) (0x80 | ((codepoint >> 6) & 0x3f));
-    std::cout << (char) (0x80 | (codepoint & 0x3f));
-  } else {
-    std::cerr << "ERROR";
-  }
+#ifndef _WIN32
+	if (codepoint < 128) {
+		std::cout << (char)codepoint;
+	}
+	else if (codepoint < 0x7ff) {
+		std::cout << (char)(0xc0 | (codepoint >> 6));
+		std::cout << (char)(0x80 | (codepoint & 0x3f));
+	}
+	else if (codepoint < 0xffff) {
+		std::cout << (char)(0xe0 | (codepoint >> 12));
+		std::cout << (char)(0x80 | ((codepoint >> 6) & 0x3f));
+		std::cout << (char)(0x80 | (codepoint & 0x3f));
+	}
+	else if (codepoint < 0x10ffff) {
+		std::cout << (char)(0xf0 | (codepoint >> 18));
+		std::cout << (char)(0x80 | ((codepoint >> 12) & 0x3f));
+		std::cout << (char)(0x80 | ((codepoint >> 6) & 0x3f));
+		std::cout << (char)(0x80 | (codepoint & 0x3f));
+	}
+	else {
+		std::cerr << "ERROR";
+	}
+#else
+	wchar_t buffer[5] = { 0 };
+	int buffPtr = 0;
+	bool badCp = false;
+	if (codepoint < 128) {
+		buffer[buffPtr++] = (wchar_t)codepoint;
+	}
+	else if (codepoint < 0x7ff) {
+		buffer[buffPtr++] = (wchar_t)(0xc0 | (codepoint >> 6));
+		buffer[buffPtr++] = (wchar_t)(0x80 | (codepoint & 0x3f));
+	}
+	else if (codepoint < 0xffff) {
+		buffer[buffPtr++] = (wchar_t)(0xe0 | (codepoint >> 12));
+		buffer[buffPtr++] = (wchar_t)(0x80 | ((codepoint >> 6) & 0x3f));
+		buffer[buffPtr++] = (wchar_t)(0x80 | (codepoint & 0x3f));
+	}
+	else if (codepoint < 0x10ffff) {
+		buffer[buffPtr++] = (wchar_t)(0xf0 | (codepoint >> 18));
+		buffer[buffPtr++] = (wchar_t)(0x80 | ((codepoint >> 12) & 0x3f));
+		buffer[buffPtr++] = (wchar_t)(0x80 | ((codepoint >> 6) & 0x3f));
+		buffer[buffPtr++] = (wchar_t)(0x80 | (codepoint & 0x3f));
+	}
+	else {
+		badCp = true;
+	}
+	if (badCp) {
+		std::cerr << "ERROR";
+	}
+	else {
+		wprintf(buffer);
+	}
+#endif
 }
-
 
 void emit_image(const cimg_library::CImg<unsigned char> & image, int flags) {
     for (int y = 0; y <= image.height() - 8; y += 8) {
@@ -438,25 +483,73 @@ cimg_library::CImg<unsigned char> load_rgb_CImg(const char * const filename) {
 	return image;
 }
 
+
+#ifdef _WIN32
+class WinCodepageGuard
+{
+private:
+	UINT _oldCodepage{ 65001 };
+public:
+	WinCodepageGuard()
+	{
+		_oldCodepage = GetConsoleCP();
+		SetConsoleOutputCP(65001); // utf-8
+	}
+	~WinCodepageGuard()
+	{
+		SetConsoleOutputCP(_oldCodepage); // restore the previous one
+	}
+};
+#endif
+
+
 int main(int argc, char* argv[]) {
   int maxWidth = 80;
   int maxHeight = 24;
   bool sizeDetectionSuccessful = true;
+#ifndef  _WIN32
   struct winsize w;
   int ioStatus = ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
   // If redirecting STDOUT to one file ( col or row == 0, or the previous ioctl call's failed )
-  if (ioStatus != 0 || (w.ws_col | w.ws_row) == 0) {
-    ioStatus = ioctl(STDIN_FILENO, TIOCGWINSZ, &w);
-    if (ioStatus != 0 || (w.ws_col | w.ws_row) == 0) {
-      std::cerr << "Warning: failed to determine most reasonable size, defaulting to 80x24" << std::endl;
-       sizeDetectionSuccessful = false;
-    }
+  if (ioStatus != 0  || (w.ws_col | w.ws_row) == 0) {
+     ioStatus = ioctl(STDIN_FILENO, TIOCGWINSZ, &w);
+     if (ioStatus != 0  || (w.ws_col | w.ws_row) == 0) {
+         std::cerr << "Warning: failed to determine most reasonable size, defaulting to 80x24" << std::endl;
+         sizeDetectionSuccessful = false;
+     }
   }
   if (sizeDetectionSuccessful)
   {
-    maxWidth = w.ws_col * 4;
-    maxHeight = w.ws_row * 8;
+      maxWidth = w.ws_col * 4;
+      maxHeight = w.ws_row * 8;
   }
+#else
+  // codepage
+  WinCodepageGuard wcpg; // changes codepage to utf-8 for the lifetime of tiv
+  // escape sequences support (necessary on older builds of Win10)
+  HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+  DWORD dwMode = 0;
+  if (GetConsoleMode(hOut, &dwMode) != 0)
+  {
+	  dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+	  SetConsoleMode(hOut, dwMode);
+  }
+  // window size
+  CONSOLE_SCREEN_BUFFER_INFO csbi;
+  if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi) == 0)
+  {
+	  if (GetConsoleScreenBufferInfo(GetStdHandle(STD_INPUT_HANDLE), &csbi) == 0)
+	  {
+		  std::cerr << "Warning: failed to determine most reasonable size, defaulting to 80x24" << std::endl;
+		  sizeDetectionSuccessful = false;
+	  }
+  }
+  if (sizeDetectionSuccessful)
+  {
+	  maxHeight = 8 * (csbi.srWindow.Bottom - csbi.srWindow.Top);
+	  maxWidth = 4 * (csbi.srWindow.Right - csbi.srWindow.Left);
+  }
+#endif
   int flags = 0;
   Mode mode = AUTO;
   int columns = 3;
@@ -513,7 +606,7 @@ int main(int argc, char* argv[]) {
 	  image.resize(new_size.width, new_size.height, -100, -100, 5);
 	}
 	emit_image(image, flags);
-      } catch(cimg_library::CImgIOException & e) {
+      } catch(cimg_library::CImgIOException &) {
 	error = 1;
 	std::cerr << "File format is not recognized for '" << file_names[i] << "'" << std::endl;
       }
@@ -535,7 +628,7 @@ int main(int argc, char* argv[]) {
 	std::string name = file_names[index++];
 	try {
 	  cimg_library::CImg<unsigned char> original = load_rgb_CImg(name.c_str());
-	  auto cut = name.find_last_of("/");
+	  auto cut = name.find_last_of(std::experimental::filesystem::path::preferred_separator);
 	  sb += cut == std::string::npos ? name : name.substr(cut + 1);
 	  size newSize = size(original).fitted_within(maxThumbSize);
 	  original.resize(newSize.width, newSize.height, 1, -100, 5);
@@ -544,7 +637,7 @@ int main(int argc, char* argv[]) {
 	  unsigned int sl = count * (cw + 2);
 	  sb.resize(sl - 2, ' ');
 	  sb += "  ";
-	} catch (std::exception & e) {
+	} catch (std::exception &) {
 	  // Probably no image; ignore.
 	}
       }
